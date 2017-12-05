@@ -1,0 +1,15 @@
+{
+	"concurrency": [1,2,5,10,25,50,100],
+	"createPrimary": true,
+	"bucket": "default",
+	"cbhost": "localhost",
+	"password": "",
+	"user": "",
+	"indexes": [
+		{"name": "bySomething", "definition": ["name"]}
+	],
+	"queries":[
+		{"name": "Select simple", "query": "select count(*) from default"},
+		{"name": "Select simple", "query": "select count(*) from default", "indexes": [{"name": "x", "definition": ["x"], "dropOnFinish": true}]}
+	]
+}
