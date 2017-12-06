@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"io/ioutil"
 	"log"
+	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -44,6 +47,8 @@ var executionConfig Configfile
 var bucket *gocb.Bucket
 var phaseCount = 0
 var errorCount = 0
+var file *os.File
+var writer *csv.Writer
 
 func phase(message string) {
 	phaseCount += 1
@@ -79,12 +84,21 @@ func executeQuery(query string, wg *sync.WaitGroup) {
 	n1qlQuery.Timeout(*queryTimeout)
 	results, err := bucket.ExecuteN1qlQuery(n1qlQuery, []interface{}{})
 	if err != nil {
+		errorCount += 1
 		log.Print(err)
 	} else {
 		results.Close()
-		errorCount += 1
 	}
 	wg.Done()
+}
+
+func addReport(queryName string, concurrentCalls int, duration time.Duration) {
+	var line = []string{queryName, strconv.Itoa(concurrentCalls), duration.String()}
+	e := writer.Write(line)
+	writer.Flush()
+	if e != nil {
+		log.Print(e)
+	}
 }
 
 func testQuery(query string, name string, concurrentCalls int) {
@@ -96,6 +110,7 @@ func testQuery(query string, name string, concurrentCalls int) {
 	}
 	wg.Wait()
 	took := time.Since(startingTime)
+	addReport(name, concurrentCalls, took)
 	log.Printf("----Query %s[%d]: Took %s", name, concurrentCalls, took)
 }
 
@@ -122,13 +137,22 @@ func startExecutionPlan() {
 	for _, v := range executionConfig.Indexes {
 		createIndex(v.Name, v.Definition)
 	}
+	phase("Creating output file")
+	var fileError error
+	file, fileError = os.Create(*output)
+	if fileError != nil {
+		log.Print("Error creating output file")
+		log.Panic(fileError)
+	}
+	writer = csv.NewWriter(file)
 	phase("Benchmarking queries")
 	for _, stmt := range executionConfig.Queries {
+		println("\n")
 		for _, ndx := range stmt.Indexes {
 			createIndex(ndx.Name, ndx.Definition)
 		}
 		for _, v := range executionConfig.Concurrency {
-			log.Printf("Testing q=%s with concurrency %d", stmt.Name, v)
+			// log.Printf("Testing q=%s with concurrency %d", stmt.Name, v)
 			testQuery(stmt.Query, stmt.Name, v)
 		}
 		for _, ndx := range stmt.Indexes {
@@ -141,7 +165,10 @@ func startExecutionPlan() {
 	for _, v := range executionConfig.Indexes {
 		dropIndex(v.Name)
 	}
+	defer writer.Flush()
+	defer file.Close()
 	log.Printf("Total errors found: %d", errorCount)
+	log.Printf("Report %s is available", *output)
 }
 
 func parseConfig() {
@@ -162,7 +189,7 @@ func main() {
 	if *showHelp == true {
 		flag.PrintDefaults()
 	} else {
-		log.Printf("Concurrency %d", *maxProcs)
+		log.Printf("Concurrency %d out of %d CPUs will be used", *maxProcs, runtime.NumCPU())
 		runtime.GOMAXPROCS(*maxProcs)
 		parseConfig()
 		startExecutionPlan()

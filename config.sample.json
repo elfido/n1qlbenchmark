@@ -1,5 +1,5 @@
 {
-	"concurrency": [1,2,5,10,25,35],
+	"concurrency": [1,2,5,10,25,35,50],
 	"createPrimary": true,
 	"bucket": "cbperf",
 	"cbhost": "localhost",
