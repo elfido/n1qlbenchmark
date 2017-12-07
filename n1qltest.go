@@ -52,6 +52,7 @@ var executionOutput = flag.String("e", "report-execution.csv", "Output file")
 var explainOutput = flag.String("p", "explain.txt", "Query explain plan file")
 var showHelp = flag.Bool("?", false, "Shows CLI help")
 var queryTimeout = flag.Duration("t", (30 * time.Second), "Query timeout")
+var pause = flag.Duration("p", 6*time.Second, "Pause between queries, this will help the cluster to recover")
 var maxProcs = flag.Int("c", 1, "Max concurrency")
 var executionConfig Configfile
 var bucket *gocb.Bucket
@@ -101,7 +102,7 @@ func executeQuery(query string, loopCount int, stats *Stats, wg *sync.WaitGroup)
 	results, err := bucket.ExecuteN1qlQuery(n1qlQuery, []interface{}{})
 	if err != nil {
 		errorCount++
-		log.Print(err)
+		log.Printf("Error in query %s", query)
 		stats.ErrorCount++
 	} else {
 		results.Close()
@@ -230,6 +231,7 @@ func startExecutionPlan() {
 		explainIt(stmt.Query)
 		for _, v := range executionConfig.Concurrency {
 			// log.Printf("Testing q=%s with concurrency %d", stmt.Name, v)
+			time.Sleep(*pause)
 			testQuery(stmt.Query, stmt.Name, v)
 		}
 		for _, ndx := range stmt.Indexes {
@@ -240,7 +242,9 @@ func startExecutionPlan() {
 	}
 	phase("Removing common indexes")
 	for _, v := range executionConfig.Indexes {
-		dropIndex(v.Name)
+		if v.DropOnFinish == true {
+			dropIndex(v.Name)
+		}
 	}
 	defer writer.Flush()
 	defer executionFileWriter.Flush()
