@@ -40,14 +40,16 @@ type Configfile struct {
 
 var configuration = flag.String("i", "config.json", "Path to the configuration file")
 var output = flag.String("o", "report.csv", "Output file")
+var explainOutput = flag.String("e", "explain.txt", "Explain file")
 var showHelp = flag.Bool("?", false, "Shows CLI help")
 var queryTimeout = flag.Duration("t", (30 * time.Second), "Query timeout")
-var maxProcs = flag.Int("c", 0, "Max concurrency")
+var maxProcs = flag.Int("c", 1, "Max concurrency")
 var executionConfig Configfile
 var bucket *gocb.Bucket
 var phaseCount = 0
 var errorCount = 0
 var file *os.File
+var explainFile *os.File
 var writer *csv.Writer
 
 func phase(message string) {
@@ -101,6 +103,29 @@ func addReport(queryName string, concurrentCalls int, duration time.Duration) {
 	}
 }
 
+func addExplainReport(query string, report string) {
+	explainFile.WriteString("\n" + query + "\n")
+	explainFile.WriteString(report)
+}
+
+func explainIt(query string) {
+	q := "explain " + query
+	log.Printf("Explaining %s", query)
+	n1qlQuery := gocb.NewN1qlQuery(q)
+	n1qlQuery.Timeout(*queryTimeout)
+	results, err := bucket.ExecuteN1qlQuery(n1qlQuery, []interface{}{})
+	if err != nil {
+		errorCount += 1
+		log.Print(err)
+	} else {
+		results.Close()
+		var r interface{}
+		results.Next(&r)
+		b, _ := json.Marshal(r)
+		addExplainReport(query, string(b))
+	}
+}
+
 func testQuery(query string, name string, concurrentCalls int) {
 	var wg sync.WaitGroup
 	startingTime := time.Now()
@@ -145,12 +170,14 @@ func startExecutionPlan() {
 		log.Panic(fileError)
 	}
 	writer = csv.NewWriter(file)
+	explainFile, fileError = os.Create(*explainOutput)
 	phase("Benchmarking queries")
 	for _, stmt := range executionConfig.Queries {
 		println("\n")
 		for _, ndx := range stmt.Indexes {
 			createIndex(ndx.Name, ndx.Definition)
 		}
+		explainIt(stmt.Query)
 		for _, v := range executionConfig.Concurrency {
 			// log.Printf("Testing q=%s with concurrency %d", stmt.Name, v)
 			testQuery(stmt.Query, stmt.Name, v)
@@ -166,6 +193,7 @@ func startExecutionPlan() {
 		dropIndex(v.Name)
 	}
 	defer writer.Flush()
+	defer explainFile.Close()
 	defer file.Close()
 	log.Printf("Total errors found: %d", errorCount)
 	log.Printf("Report %s is available", *output)
