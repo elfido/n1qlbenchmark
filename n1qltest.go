@@ -15,6 +15,11 @@ import (
 	"github.com/couchbase/gocb"
 )
 
+type Stats struct{
+	Accumulated time.Duration "json:`accumulated`"
+	SuccessCount int "json:`successCount`"
+}
+
 type Query struct {
 	Name    string  "json:`name`"
 	Query   string  "json:`query`"
@@ -29,6 +34,7 @@ type Index struct {
 
 type Configfile struct {
 	Concurrency   []int   `json:"concurrency"`
+	Repetitions int `json:"repetitions"`
 	CreatePrimary bool    `json:"createPrimary"`
 	Bucket        string  `json:"bucket"`
 	Cbhost        string  `json:"cbhost"`
@@ -51,6 +57,7 @@ var errorCount = 0
 var file *os.File
 var explainFile *os.File
 var writer *csv.Writer
+var repetitions = 1
 
 func phase(message string) {
 	phaseCount += 1
@@ -81,7 +88,7 @@ func createPrimaryIndex() {
 	}
 }
 
-func executeQuery(query string, wg *sync.WaitGroup) {
+func executeQuery(query string, loopCount int, stats Stats, wg *sync.WaitGroup) {
 	n1qlQuery := gocb.NewN1qlQuery(query)
 	n1qlQuery.Timeout(*queryTimeout)
 	results, err := bucket.ExecuteN1qlQuery(n1qlQuery, []interface{}{})
@@ -90,8 +97,16 @@ func executeQuery(query string, wg *sync.WaitGroup) {
 		log.Print(err)
 	} else {
 		results.Close()
+		stats.Accumulated+=results.Metrics().ExecutionTime
+
 	}
-	wg.Done()
+	loopCount += 1
+	if (loopCount<repetitions){
+		executeQuery(query, loopCount, stats, nil)
+	}
+	if wg!= nil{
+		wg.Done()
+	}
 }
 
 func addReport(queryName string, concurrentCalls int, duration time.Duration) {
@@ -131,7 +146,8 @@ func testQuery(query string, name string, concurrentCalls int) {
 	startingTime := time.Now()
 	for i := 0; i < concurrentCalls; i++ {
 		wg.Add(1)
-		go executeQuery(query, &wg)
+		var groupStats Stats
+		go executeQuery(query, 0, stats, &wg)
 	}
 	wg.Wait()
 	took := time.Since(startingTime)
@@ -210,6 +226,7 @@ func parseConfig() {
 		log.Print(err)
 		log.Panic("Invalid configuration file or format")
 	}
+	repetitions = executionConfig.Repetitions
 }
 
 func main() {
