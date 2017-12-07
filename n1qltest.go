@@ -15,9 +15,11 @@ import (
 	"github.com/couchbase/gocb"
 )
 
-type Stats struct{
-	Accumulated time.Duration "json:`accumulated`"
-	SuccessCount int "json:`successCount`"
+type Stats struct {
+	Accumulated  time.Duration "json:`accumulated`"
+	SuccessCount int           "json:`successCount`"
+	ErrorCount   int           "json:`errorCount`"
+	Average      float64       "json:`average`"
 }
 
 type Query struct {
@@ -34,7 +36,7 @@ type Index struct {
 
 type Configfile struct {
 	Concurrency   []int   `json:"concurrency"`
-	Repetitions int `json:"repetitions"`
+	Repetitions   int     `json:"repetitions"`
 	CreatePrimary bool    `json:"createPrimary"`
 	Bucket        string  `json:"bucket"`
 	Cbhost        string  `json:"cbhost"`
@@ -45,8 +47,9 @@ type Configfile struct {
 }
 
 var configuration = flag.String("i", "config.json", "Path to the configuration file")
-var output = flag.String("o", "report.csv", "Output file")
-var explainOutput = flag.String("e", "explain.txt", "Explain file")
+var output = flag.String("o", "report-sdk.csv", "Output file")
+var executionOutput = flag.String("e", "report-execution.csv", "Output file")
+var explainOutput = flag.String("p", "explain.txt", "Query explain plan file")
 var showHelp = flag.Bool("?", false, "Shows CLI help")
 var queryTimeout = flag.Duration("t", (30 * time.Second), "Query timeout")
 var maxProcs = flag.Int("c", 1, "Max concurrency")
@@ -54,10 +57,14 @@ var executionConfig Configfile
 var bucket *gocb.Bucket
 var phaseCount = 0
 var errorCount = 0
+var repetitions = 1
+
+// Output files
 var file *os.File
 var explainFile *os.File
 var writer *csv.Writer
-var repetitions = 1
+var executionFile *os.File
+var executionFileWriter *csv.Writer
 
 func phase(message string) {
 	phaseCount += 1
@@ -88,24 +95,41 @@ func createPrimaryIndex() {
 	}
 }
 
-func executeQuery(query string, loopCount int, stats Stats, wg *sync.WaitGroup) {
+func executeQuery(query string, loopCount int, stats *Stats, wg *sync.WaitGroup) {
 	n1qlQuery := gocb.NewN1qlQuery(query)
 	n1qlQuery.Timeout(*queryTimeout)
 	results, err := bucket.ExecuteN1qlQuery(n1qlQuery, []interface{}{})
 	if err != nil {
-		errorCount += 1
+		errorCount++
 		log.Print(err)
+		stats.ErrorCount++
 	} else {
 		results.Close()
-		stats.Accumulated+=results.Metrics().ExecutionTime
+		stats.Accumulated += results.Metrics().ExecutionTime
+		stats.SuccessCount++
 
 	}
 	loopCount += 1
-	if (loopCount<repetitions){
+	if loopCount < repetitions {
 		executeQuery(query, loopCount, stats, nil)
 	}
-	if wg!= nil{
+	if wg != nil {
 		wg.Done()
+	}
+}
+
+func addExecutionReport(queryName string, concurrency int, stats *Stats) {
+	accumulated := stats.Accumulated.String()
+	average := strconv.FormatFloat(stats.Average, 'f', 2, 64)
+	successCount := strconv.Itoa(stats.SuccessCount)
+	reps := strconv.Itoa(repetitions)
+	concurrent := strconv.Itoa(concurrency)
+	errorCount := strconv.Itoa(stats.ErrorCount)
+	var line = []string{queryName, concurrent, reps, accumulated, average, successCount, errorCount}
+	e := executionFileWriter.Write(line)
+	executionFileWriter.Flush()
+	if e != nil {
+		log.Print(e)
 	}
 }
 
@@ -130,7 +154,7 @@ func explainIt(query string) {
 	n1qlQuery.Timeout(*queryTimeout)
 	results, err := bucket.ExecuteN1qlQuery(n1qlQuery, []interface{}{})
 	if err != nil {
-		errorCount += 1
+		errorCount++
 		log.Print(err)
 	} else {
 		results.Close()
@@ -144,15 +168,19 @@ func explainIt(query string) {
 func testQuery(query string, name string, concurrentCalls int) {
 	var wg sync.WaitGroup
 	startingTime := time.Now()
+	var groupStats Stats
 	for i := 0; i < concurrentCalls; i++ {
 		wg.Add(1)
-		var groupStats Stats
-		go executeQuery(query, 0, stats, &wg)
+		go executeQuery(query, 0, &groupStats, &wg)
 	}
 	wg.Wait()
 	took := time.Since(startingTime)
+	floated := float64(groupStats.SuccessCount)
+	groupStats.Average = float64(groupStats.Accumulated/time.Millisecond) / floated
+	log.Printf("Couchbase usage: %s   Per Query: %f   Success: %d   Error: %d", groupStats.Accumulated.String(), groupStats.Average, groupStats.SuccessCount, groupStats.ErrorCount)
+	addExecutionReport(name, concurrentCalls, &groupStats)
 	addReport(name, concurrentCalls, took)
-	log.Printf("----Query %s[%d]: Took %s", name, concurrentCalls, took)
+	log.Printf("----Query %s[%d]: Total SDK Time: %s", name, concurrentCalls, took)
 }
 
 func startExecutionPlan() {
@@ -185,7 +213,13 @@ func startExecutionPlan() {
 		log.Print("Error creating output file")
 		log.Panic(fileError)
 	}
+	executionFile, fileError = os.Create(*executionOutput)
+	if fileError != nil {
+		log.Print("Error creating output file (execution)")
+		log.Panic(fileError)
+	}
 	writer = csv.NewWriter(file)
+	executionFileWriter = csv.NewWriter(executionFile)
 	explainFile, fileError = os.Create(*explainOutput)
 	phase("Benchmarking queries")
 	for _, stmt := range executionConfig.Queries {
@@ -209,6 +243,8 @@ func startExecutionPlan() {
 		dropIndex(v.Name)
 	}
 	defer writer.Flush()
+	defer executionFileWriter.Flush()
+	defer executionFile.Close()
 	defer explainFile.Close()
 	defer file.Close()
 	log.Printf("Total errors found: %d", errorCount)
