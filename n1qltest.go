@@ -61,15 +61,15 @@ var errorCount = 0
 var repetitions = 1
 var qSuccessCount int32
 var qErrorCount int32
+var qDuration int64
 
 // Output files
 var explainFile *os.File
-
 var executionFile *os.File
 var executionFileWriter *csv.Writer
 
 func phase(message string) {
-	phaseCount += 1
+	phaseCount++
 	log.Printf("Phase %d %s", phaseCount, message)
 }
 
@@ -97,22 +97,22 @@ func createPrimaryIndex() {
 	}
 }
 
-func executeQuery(query string, loopCount int, stats *Stats, wg *sync.WaitGroup) {
+func executeQuery(query string, loopCount int, wg *sync.WaitGroup) {
 	n1qlQuery := gocb.NewN1qlQuery(query)
 	n1qlQuery.Timeout(*queryTimeout)
 	results, err := bucket.ExecuteN1qlQuery(n1qlQuery, []interface{}{})
 	if err != nil {
-		log.Print(err)
+		// log.Print(err)
 		atomic.AddInt32(&qErrorCount, 1)
 		errorCount++
 	} else {
 		results.Close()
-		stats.Accumulated += results.Metrics().ExecutionTime
+		atomic.AddInt64(&qDuration, int64(results.Metrics().ExecutionTime))
 		atomic.AddInt32(&qSuccessCount, 1)
 	}
 	loopCount++
 	if loopCount < repetitions {
-		executeQuery(query, loopCount, stats, nil)
+		executeQuery(query, loopCount, nil)
 	}
 	if wg != nil {
 		wg.Done()
@@ -172,14 +172,17 @@ func testQuery(query string, name string, concurrentCalls int) {
 	var groupStats Stats
 	qErrorCount = 0
 	qSuccessCount = 0
+	qDuration = 0
 	for i := 0; i < concurrentCalls; i++ {
 		wg.Add(1)
-		go executeQuery(query, 0, &groupStats, &wg)
+		go executeQuery(query, 0, &wg)
 	}
 	wg.Wait()
+	took := time.Since(startingTime)
+	d := time.Duration(qDuration)
+	groupStats.Accumulated = d
 	groupStats.ErrorCount = qErrorCount
 	groupStats.SuccessCount = qSuccessCount
-	took := time.Since(startingTime)
 	floated := float64(groupStats.SuccessCount)
 	groupStats.Average = float64(groupStats.Accumulated/time.Millisecond) / floated
 	log.Printf("Couchbase usage: %s   Per Query: %f   Success: %d   Error: %d", groupStats.Accumulated.String(), groupStats.Average, groupStats.SuccessCount, groupStats.ErrorCount)
