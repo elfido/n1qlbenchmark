@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/couchbase/gocb"
@@ -17,8 +18,8 @@ import (
 
 type Stats struct {
 	Accumulated  time.Duration "json:`accumulated`"
-	SuccessCount int           "json:`successCount`"
-	ErrorCount   int           "json:`errorCount`"
+	SuccessCount int32         "json:`successCount`"
+	ErrorCount   int32         "json:`errorCount`"
 	Average      float64       "json:`average`"
 }
 
@@ -47,23 +48,23 @@ type Configfile struct {
 }
 
 var configuration = flag.String("i", "config.json", "Path to the configuration file")
-var output = flag.String("o", "report-sdk.csv", "Output file")
-var executionOutput = flag.String("e", "report-execution.csv", "Output file")
+var executionOutput = flag.String("o", "report-execution.csv", "Output file")
 var explainOutput = flag.String("p", "explain.txt", "Query explain plan file")
-var showHelp = flag.Bool("?", false, "Shows CLI help")
+var showHelp = flag.Bool("?", false, "Shows CLI help :)")
 var queryTimeout = flag.Duration("t", (30 * time.Second), "Query timeout")
-var pause = flag.Duration("p", 6*time.Second, "Pause between queries, this will help the cluster to recover")
+var pause = flag.Duration("pause", 2*time.Second, "Pause between queries, this will help the cluster to recover")
 var maxProcs = flag.Int("c", 1, "Max concurrency")
 var executionConfig Configfile
 var bucket *gocb.Bucket
 var phaseCount = 0
 var errorCount = 0
 var repetitions = 1
+var qSuccessCount int32
+var qErrorCount int32
 
 // Output files
-var file *os.File
 var explainFile *os.File
-var writer *csv.Writer
+
 var executionFile *os.File
 var executionFileWriter *csv.Writer
 
@@ -101,16 +102,15 @@ func executeQuery(query string, loopCount int, stats *Stats, wg *sync.WaitGroup)
 	n1qlQuery.Timeout(*queryTimeout)
 	results, err := bucket.ExecuteN1qlQuery(n1qlQuery, []interface{}{})
 	if err != nil {
+		log.Print(err)
+		atomic.AddInt32(&qErrorCount, 1)
 		errorCount++
-		log.Printf("Error in query %s", query)
-		stats.ErrorCount++
 	} else {
 		results.Close()
 		stats.Accumulated += results.Metrics().ExecutionTime
-		stats.SuccessCount++
-
+		atomic.AddInt32(&qSuccessCount, 1)
 	}
-	loopCount += 1
+	loopCount++
 	if loopCount < repetitions {
 		executeQuery(query, loopCount, stats, nil)
 	}
@@ -122,10 +122,10 @@ func executeQuery(query string, loopCount int, stats *Stats, wg *sync.WaitGroup)
 func addExecutionReport(queryName string, concurrency int, stats *Stats) {
 	accumulated := stats.Accumulated.String()
 	average := strconv.FormatFloat(stats.Average, 'f', 2, 64)
-	successCount := strconv.Itoa(stats.SuccessCount)
+	successCount := strconv.FormatInt(int64(stats.SuccessCount), 10)
 	reps := strconv.Itoa(repetitions)
 	concurrent := strconv.Itoa(concurrency)
-	errorCount := strconv.Itoa(stats.ErrorCount)
+	errorCount := strconv.FormatInt(int64(stats.ErrorCount), 10)
 	var line = []string{queryName, concurrent, reps, accumulated, average, successCount, errorCount}
 	e := executionFileWriter.Write(line)
 	executionFileWriter.Flush()
@@ -135,12 +135,12 @@ func addExecutionReport(queryName string, concurrency int, stats *Stats) {
 }
 
 func addReport(queryName string, concurrentCalls int, duration time.Duration) {
-	var line = []string{queryName, strconv.Itoa(concurrentCalls), duration.String()}
-	e := writer.Write(line)
-	writer.Flush()
-	if e != nil {
-		log.Print(e)
-	}
+	// var line = []string{queryName, strconv.Itoa(concurrentCalls), duration.String()}
+	// e := writer.Write(line)
+	// writer.Flush()
+	// if e != nil {
+	// 	log.Print(e)
+	// }
 }
 
 func addExplainReport(query string, report string) {
@@ -170,11 +170,15 @@ func testQuery(query string, name string, concurrentCalls int) {
 	var wg sync.WaitGroup
 	startingTime := time.Now()
 	var groupStats Stats
+	qErrorCount = 0
+	qSuccessCount = 0
 	for i := 0; i < concurrentCalls; i++ {
 		wg.Add(1)
 		go executeQuery(query, 0, &groupStats, &wg)
 	}
 	wg.Wait()
+	groupStats.ErrorCount = qErrorCount
+	groupStats.SuccessCount = qSuccessCount
 	took := time.Since(startingTime)
 	floated := float64(groupStats.SuccessCount)
 	groupStats.Average = float64(groupStats.Accumulated/time.Millisecond) / floated
@@ -209,17 +213,11 @@ func startExecutionPlan() {
 	}
 	phase("Creating output file")
 	var fileError error
-	file, fileError = os.Create(*output)
-	if fileError != nil {
-		log.Print("Error creating output file")
-		log.Panic(fileError)
-	}
 	executionFile, fileError = os.Create(*executionOutput)
 	if fileError != nil {
 		log.Print("Error creating output file (execution)")
 		log.Panic(fileError)
 	}
-	writer = csv.NewWriter(file)
 	executionFileWriter = csv.NewWriter(executionFile)
 	explainFile, fileError = os.Create(*explainOutput)
 	phase("Benchmarking queries")
@@ -234,6 +232,7 @@ func startExecutionPlan() {
 			time.Sleep(*pause)
 			testQuery(stmt.Query, stmt.Name, v)
 		}
+		time.Sleep(*pause * 3)
 		for _, ndx := range stmt.Indexes {
 			if ndx.DropOnFinish == true {
 				dropIndex(ndx.Name)
@@ -246,13 +245,10 @@ func startExecutionPlan() {
 			dropIndex(v.Name)
 		}
 	}
-	defer writer.Flush()
-	defer executionFileWriter.Flush()
 	defer executionFile.Close()
 	defer explainFile.Close()
-	defer file.Close()
 	log.Printf("Total errors found: %d", errorCount)
-	log.Printf("Report %s is available", *output)
+	log.Printf("Report %s is available", *executionOutput)
 }
 
 func parseConfig() {
@@ -272,8 +268,13 @@ func parseConfig() {
 func main() {
 	flag.Parse()
 	if *showHelp == true {
+		println("\nN1QL Benchmark\n")
 		flag.PrintDefaults()
+		log.Print("Fido")
 	} else {
+		if *maxProcs > runtime.NumCPU() {
+			*maxProcs = runtime.NumCPU()
+		}
 		log.Printf("Concurrency %d out of %d CPUs will be used", *maxProcs, runtime.NumCPU())
 		runtime.GOMAXPROCS(*maxProcs)
 		parseConfig()
