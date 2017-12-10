@@ -17,10 +17,10 @@ import (
 )
 
 type Stats struct {
-	Accumulated  time.Duration "json:`accumulated`"
-	SuccessCount int32         "json:`successCount`"
-	ErrorCount   int32         "json:`errorCount`"
-	Average      float64       "json:`average`"
+	Accumulated  time.Duration
+	SuccessCount int32
+	ErrorCount   int32
+	Average      float64
 }
 
 type Query struct {
@@ -102,7 +102,6 @@ func executeQuery(query string, loopCount int, wg *sync.WaitGroup) {
 	n1qlQuery.Timeout(*queryTimeout)
 	results, err := bucket.ExecuteN1qlQuery(n1qlQuery, []interface{}{})
 	if err != nil {
-		// log.Print(err)
 		atomic.AddInt32(&qErrorCount, 1)
 		errorCount++
 	} else {
@@ -132,15 +131,6 @@ func addExecutionReport(queryName string, concurrency int, stats *Stats) {
 	if e != nil {
 		log.Print(e)
 	}
-}
-
-func addReport(queryName string, concurrentCalls int, duration time.Duration) {
-	// var line = []string{queryName, strconv.Itoa(concurrentCalls), duration.String()}
-	// e := writer.Write(line)
-	// writer.Flush()
-	// if e != nil {
-	// 	log.Print(e)
-	// }
 }
 
 func addExplainReport(query string, report string) {
@@ -187,7 +177,6 @@ func testQuery(query string, name string, concurrentCalls int) {
 	groupStats.Average = float64(groupStats.Accumulated/time.Millisecond) / floated
 	log.Printf("Couchbase usage: %s   Per Query: %f   Success: %d   Error: %d", groupStats.Accumulated.String(), groupStats.Average, groupStats.SuccessCount, groupStats.ErrorCount)
 	addExecutionReport(name, concurrentCalls, &groupStats)
-	addReport(name, concurrentCalls, took)
 	log.Printf("----Query %s[%d]: Total SDK Time: %s", name, concurrentCalls, took)
 }
 
@@ -231,7 +220,6 @@ func startExecutionPlan() {
 		}
 		explainIt(stmt.Query)
 		for _, v := range executionConfig.Concurrency {
-			// log.Printf("Testing q=%s with concurrency %d", stmt.Name, v)
 			time.Sleep(*pause)
 			testQuery(stmt.Query, stmt.Name, v)
 		}
