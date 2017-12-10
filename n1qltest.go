@@ -73,28 +73,28 @@ func phase(message string) {
 	log.Printf("Phase %d %s", phaseCount, message)
 }
 
-func createIndex(name string, definition []string) {
-	log.Printf("Creating index %s", name)
-	err := bucket.Manager(executionConfig.User, executionConfig.Password).CreateIndex(name, definition, true, false)
+func genericEHandler(err error) {
 	if err != nil {
 		log.Print(err)
 	}
+}
+
+func createIndex(name string, definition []string) {
+	log.Printf("Creating index %s", name)
+	err := bucket.Manager(executionConfig.User, executionConfig.Password).CreateIndex(name, definition, true, false)
+	genericEHandler(err)
 }
 
 func dropIndex(name string) {
 	log.Printf("Removing index %s", name)
 	err := bucket.Manager(executionConfig.User, executionConfig.Password).DropIndex(name, true)
-	if err != nil {
-		log.Print(err)
-	}
+	genericEHandler(err)
 }
 
 func createPrimaryIndex() {
 	log.Print("Creating primary index")
 	err := bucket.Manager(executionConfig.User, executionConfig.Password).CreatePrimaryIndex("primary", false, false)
-	if err != nil {
-		log.Print(err)
-	}
+	genericEHandler(err)
 }
 
 func executeQuery(query string, loopCount int, wg *sync.WaitGroup) {
@@ -128,9 +128,7 @@ func addExecutionReport(queryName string, concurrency int, stats *Stats) {
 	var line = []string{queryName, concurrent, reps, accumulated, average, successCount, errorCount}
 	e := executionFileWriter.Write(line)
 	executionFileWriter.Flush()
-	if e != nil {
-		log.Print(e)
-	}
+	genericEHandler(e)
 }
 
 func addExplainReport(query string, report string) {
@@ -184,16 +182,10 @@ func startExecutionPlan() {
 	connectionStr := "couchbase://" + executionConfig.Cbhost
 	log.Printf("Connecting to bucket %s in cluster %s and query timeout is %s", executionConfig.Bucket, connectionStr, *queryTimeout)
 	cluster, err := gocb.Connect(connectionStr)
-	if err != nil {
-		log.Print(err)
-		log.Panic("Cannot connect to cluster")
-	}
+	panicIt(err, "Cannot connect to cluster")
 	cluster.SetConnectTimeout(2 * time.Second)
 	cbBucket, berr := cluster.OpenBucket(executionConfig.Bucket, executionConfig.Password)
-	if berr != nil {
-		log.Print(berr)
-		log.Panic("Cannot connect to bucket")
-	}
+	panicIt(berr, "Cannot connect to bucket")
 	bucket = cbBucket
 	if executionConfig.CreatePrimary == true {
 		phase("Creating primary index")
@@ -206,10 +198,7 @@ func startExecutionPlan() {
 	phase("Creating output file")
 	var fileError error
 	executionFile, fileError = os.Create(*executionOutput)
-	if fileError != nil {
-		log.Print("Error creating output file (execution)")
-		log.Panic(fileError)
-	}
+	panicIt(fileError, "Error creating output file (execution)")
 	executionFileWriter = csv.NewWriter(executionFile)
 	explainFile, fileError = os.Create(*explainOutput)
 	phase("Benchmarking queries")
@@ -249,10 +238,7 @@ func parseConfig() {
 		log.Panicf("Cannot open the configuration file %s", *configuration)
 	}
 	err = json.Unmarshal(data, &executionConfig)
-	if err != nil {
-		log.Print(err)
-		log.Panic("Invalid configuration file or format")
-	}
+	panicIt(err, "Invalid configuration file or format")
 	repetitions = executionConfig.Repetitions
 }
 
@@ -261,7 +247,6 @@ func main() {
 	if *showHelp == true {
 		println("\nN1QL Benchmark\n")
 		flag.PrintDefaults()
-		log.Print("Fido")
 	} else {
 		if *maxProcs > runtime.NumCPU() {
 			*maxProcs = runtime.NumCPU()
