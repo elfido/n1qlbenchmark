@@ -16,25 +16,34 @@ import (
 	"github.com/couchbase/gocb"
 )
 
-type Stats struct {
+type queryStats struct {
 	Accumulated  time.Duration
 	SuccessCount int32
 	ErrorCount   int32
 	Average      float64
 }
 
+/*
+Query defines the Queries that will be used during the benchmark
+*/
 type Query struct {
-	Name    string  "json:`name`"
-	Query   string  "json:`query`"
-	Indexes []Index "json:`indexes`"
+	Name    string  `json:"name"`
+	Query   string  `json:"query"`
+	Indexes []Index `json:"indexes"`
 }
 
+/*
+Index defines the name and index fields required by the benchmark
+*/
 type Index struct {
-	Name         string   "json:`name`"
-	Definition   []string "json:`definition`"
-	DropOnFinish bool     "json:`dropOnFinish`"
+	Name         string   `json:"name"`
+	Definition   []string `json:"definition"`
+	DropOnFinish bool     `json:"dropOnFinish"`
 }
 
+/*
+ConfigFile defines the structure of the configuration JSON file used as input for the benchmark plan
+*/
 type Configfile struct {
 	Concurrency   []int   `json:"concurrency"`
 	Repetitions   int     `json:"repetitions"`
@@ -47,13 +56,19 @@ type Configfile struct {
 	Queries       []Query `json:"queries"`
 }
 
+type report struct {
+	Name        string
+	Concurrency int
+	Stats       *queryStats
+}
+
 var configuration = flag.String("i", "config.json", "Path to the configuration file")
 var executionOutput = flag.String("o", "report-execution.csv", "Output file")
 var explainOutput = flag.String("p", "explain.txt", "Query explain plan file")
 var showHelp = flag.Bool("?", false, "Shows CLI help :)")
 var queryTimeout = flag.Duration("t", (30 * time.Second), "Query timeout")
 var pause = flag.Duration("pause", 2*time.Second, "Pause between queries, this will help the cluster to recover")
-var maxProcs = flag.Int("c", 1, "Max concurrency")
+var maxProcs = flag.Int("c", 2, "Max concurrency")
 var executionConfig Configfile
 var bucket *gocb.Bucket
 var phaseCount = 0
@@ -62,22 +77,13 @@ var repetitions = 1
 var qSuccessCount int32
 var qErrorCount int32
 var qDuration int64
+var finalReport []report
+var currentIndex = 0
 
 // Output files
 var explainFile *os.File
 var executionFile *os.File
 var executionFileWriter *csv.Writer
-
-func phase(message string) {
-	phaseCount++
-	log.Printf("Phase %d %s", phaseCount, message)
-}
-
-func genericEHandler(err error) {
-	if err != nil {
-		log.Print(err)
-	}
-}
 
 func createIndex(name string, definition []string) {
 	log.Printf("Creating index %s", name)
@@ -118,7 +124,7 @@ func executeQuery(query string, loopCount int, wg *sync.WaitGroup) {
 	}
 }
 
-func addExecutionReport(queryName string, concurrency int, stats *Stats) {
+func addExecutionReport(queryName string, concurrency int, stats *queryStats) {
 	accumulated := stats.Accumulated.String()
 	average := strconv.FormatFloat(stats.Average, 'f', 2, 64)
 	successCount := strconv.FormatInt(int64(stats.SuccessCount), 10)
@@ -157,7 +163,7 @@ func explainIt(query string) {
 func testQuery(query string, name string, concurrentCalls int) {
 	var wg sync.WaitGroup
 	startingTime := time.Now()
-	var groupStats Stats
+	var groupStats queryStats
 	qErrorCount = 0
 	qSuccessCount = 0
 	qDuration = 0
@@ -175,10 +181,15 @@ func testQuery(query string, name string, concurrentCalls int) {
 	groupStats.Average = float64(groupStats.Accumulated/time.Millisecond) / floated
 	log.Printf("Couchbase usage: %s   Per Query: %f   Success: %d   Error: %d", groupStats.Accumulated.String(), groupStats.Average, groupStats.SuccessCount, groupStats.ErrorCount)
 	addExecutionReport(name, concurrentCalls, &groupStats)
+	var rep report
+	rep.Name = name
+	rep.Stats = &groupStats
+	rep.Concurrency = concurrentCalls
+	finalReport[currentIndex] = rep
 	log.Printf("----Query %s[%d]: Total SDK Time: %s", name, concurrentCalls, took)
 }
 
-func startExecutionPlan() {
+func startConnection() {
 	connectionStr := "couchbase://" + executionConfig.Cbhost
 	log.Printf("Connecting to bucket %s in cluster %s and query timeout is %s", executionConfig.Bucket, connectionStr, *queryTimeout)
 	cluster, err := gocb.Connect(connectionStr)
@@ -187,6 +198,9 @@ func startExecutionPlan() {
 	cbBucket, berr := cluster.OpenBucket(executionConfig.Bucket, executionConfig.Password)
 	panicIt(berr, "Cannot connect to bucket")
 	bucket = cbBucket
+}
+
+func createCommonIndexes() {
 	if executionConfig.CreatePrimary == true {
 		phase("Creating primary index")
 		createPrimaryIndex()
@@ -195,12 +209,18 @@ func startExecutionPlan() {
 	for _, v := range executionConfig.Indexes {
 		createIndex(v.Name, v.Definition)
 	}
-	phase("Creating output file")
-	var fileError error
-	executionFile, fileError = os.Create(*executionOutput)
-	panicIt(fileError, "Error creating output file (execution)")
-	executionFileWriter = csv.NewWriter(executionFile)
-	explainFile, fileError = os.Create(*explainOutput)
+}
+
+func removeCommonIndexes() {
+	phase("Removing common indexes")
+	for _, v := range executionConfig.Indexes {
+		if v.DropOnFinish == true {
+			dropIndex(v.Name)
+		}
+	}
+}
+
+func startBenchmark() {
 	phase("Benchmarking queries")
 	for _, stmt := range executionConfig.Queries {
 		println("\n")
@@ -211,6 +231,7 @@ func startExecutionPlan() {
 		for _, v := range executionConfig.Concurrency {
 			time.Sleep(*pause)
 			testQuery(stmt.Query, stmt.Name, v)
+			currentIndex++
 		}
 		time.Sleep(*pause * 3)
 		for _, ndx := range stmt.Indexes {
@@ -219,16 +240,26 @@ func startExecutionPlan() {
 			}
 		}
 	}
-	phase("Removing common indexes")
-	for _, v := range executionConfig.Indexes {
-		if v.DropOnFinish == true {
-			dropIndex(v.Name)
-		}
-	}
+}
+
+func startExecutionPlan() {
+	startConnection()
+	createCommonIndexes()
+	phase("Creating output file")
+	var fileError error
+	executionFile, fileError = os.Create(*executionOutput)
+	panicIt(fileError, "Error creating output file (execution)")
+	executionFileWriter = csv.NewWriter(executionFile)
+	explainFile, fileError = os.Create(*explainOutput)
+	totalRecords := len(executionConfig.Queries) * len(executionConfig.Concurrency)
+	finalReport = make([]report, totalRecords)
+	startBenchmark()
+	removeCommonIndexes()
 	defer executionFile.Close()
 	defer explainFile.Close()
-	log.Printf("Total errors found: %d", errorCount)
-	log.Printf("Report %s is available", *executionOutput)
+	log.Printf("\n\nTotal errors found: %d", errorCount)
+	log.Printf("Report %s is available\n\n", *executionOutput)
+	printSummary()
 }
 
 func parseConfig() {
