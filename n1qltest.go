@@ -4,7 +4,6 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"flag"
-	"io/ioutil"
 	"log"
 	"os"
 	"runtime"
@@ -15,6 +14,8 @@ import (
 
 	"github.com/couchbase/gocb"
 )
+
+const VERSION = "1.0.0"
 
 type queryStats struct {
 	Accumulated  time.Duration
@@ -41,30 +42,20 @@ type Index struct {
 	DropOnFinish bool     `json:"dropOnFinish"`
 }
 
-/*
-ConfigFile defines the structure of the configuration JSON file used as input for the benchmark plan
-*/
-type Configfile struct {
-	Concurrency   []int   `json:"concurrency"`
-	Repetitions   int     `json:"repetitions"`
-	CreatePrimary bool    `json:"createPrimary"`
-	Bucket        string  `json:"bucket"`
-	Cbhost        string  `json:"cbhost"`
-	Password      string  `json:"password"`
-	User          string  `json:"user"`
-	Indexes       []Index `json:"indexes"`
-	Queries       []Query `json:"queries"`
-}
-
 type report struct {
 	Name        string
 	Concurrency int
 	Stats       *queryStats
 }
 
+type explainReport struct {
+	Query string      `json:"query"`
+	Plan  interface{} `json:"plan"`
+}
+
 var configuration = flag.String("i", "config.json", "Path to the configuration file")
 var executionOutput = flag.String("o", "report-execution.csv", "Output file")
-var explainOutput = flag.String("p", "explain.txt", "Query explain plan file")
+var explainOutput = flag.String("p", "explain.json", "Query explain plan file")
 var showHelp = flag.Bool("?", false, "Shows CLI help :)")
 var queryTimeout = flag.Duration("t", (30 * time.Second), "Query timeout")
 var pause = flag.Duration("pause", 2*time.Second, "Pause between queries, this will help the cluster to recover")
@@ -78,10 +69,12 @@ var qSuccessCount int32
 var qErrorCount int32
 var qDuration int64
 var finalReport []report
+var plans []explainReport
 var currentIndex = 0
 
 // Output files
-var explainFile *os.File
+// var explainFile *os.File
+var explainJsonFile *os.File
 var executionFile *os.File
 var executionFileWriter *csv.Writer
 
@@ -138,8 +131,16 @@ func addExecutionReport(queryName string, concurrency int, stats *queryStats) {
 }
 
 func addExplainReport(query string, report string) {
-	explainFile.WriteString("\n" + query + "\n")
-	explainFile.WriteString(report)
+	var content interface{}
+	bytes := []byte(report)
+	err := json.Unmarshal(bytes, &content)
+	if err == nil {
+		plan := explainReport{
+			Query: query,
+			Plan:  content,
+		}
+		plans[currentIndex] = plan
+	}
 }
 
 func explainIt(query string) {
@@ -195,6 +196,13 @@ func startConnection() {
 	cluster, err := gocb.Connect(connectionStr)
 	panicIt(err, "Cannot connect to cluster")
 	cluster.SetConnectTimeout(2 * time.Second)
+	if executionConfig.User != "" {
+		log.Printf("Authenticating user %s", executionConfig.User)
+		cluster.Authenticate(gocb.PasswordAuthenticator{
+			Username: executionConfig.User,
+			Password: executionConfig.Password,
+		})
+	}
 	cbBucket, berr := cluster.OpenBucket(executionConfig.Bucket, executionConfig.Password)
 	panicIt(berr, "Cannot connect to bucket")
 	bucket = cbBucket
@@ -223,7 +231,7 @@ func removeCommonIndexes() {
 func startBenchmark() {
 	phase("Benchmarking queries")
 	for _, stmt := range executionConfig.Queries {
-		println("\n")
+		println("")
 		for _, ndx := range stmt.Indexes {
 			createIndex(ndx.Name, ndx.Definition)
 		}
@@ -242,6 +250,14 @@ func startBenchmark() {
 	}
 }
 
+func closeExplainReport() {
+	txt, err := json.MarshalIndent(plans, "", "\t")
+	if err == nil {
+		explainJsonFile.WriteString(string(txt))
+	}
+	explainJsonFile.Close()
+}
+
 func startExecutionPlan() {
 	startConnection()
 	createCommonIndexes()
@@ -250,33 +266,23 @@ func startExecutionPlan() {
 	executionFile, fileError = os.Create(*executionOutput)
 	panicIt(fileError, "Error creating output file (execution)")
 	executionFileWriter = csv.NewWriter(executionFile)
-	explainFile, fileError = os.Create(*explainOutput)
+	explainJsonFile, fileError = os.Create(*explainOutput)
 	totalRecords := len(executionConfig.Queries) * len(executionConfig.Concurrency)
 	finalReport = make([]report, totalRecords)
+	plans = make([]explainReport, len(executionConfig.Queries))
 	startBenchmark()
 	removeCommonIndexes()
 	defer executionFile.Close()
-	defer explainFile.Close()
+	defer closeExplainReport()
 	log.Printf("\n\nTotal errors found: %d", errorCount)
 	log.Printf("Report %s is available\n\n", *executionOutput)
 	printSummary()
 }
 
-func parseConfig() {
-	data, err := ioutil.ReadFile(*configuration)
-	if err != nil {
-		log.Print(err)
-		log.Panicf("Cannot open the configuration file %s", *configuration)
-	}
-	err = json.Unmarshal(data, &executionConfig)
-	panicIt(err, "Invalid configuration file or format")
-	repetitions = executionConfig.Repetitions
-}
-
 func main() {
 	flag.Parse()
 	if *showHelp == true {
-		println("\nN1QL Benchmark\n")
+		println("\nN1QL Benchmark " + VERSION)
 		flag.PrintDefaults()
 	} else {
 		if *maxProcs > runtime.NumCPU() {

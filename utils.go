@@ -1,9 +1,37 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 )
+
+/*
+ConfigFile defines the structure of the configuration JSON file used as input for the benchmark plan
+*/
+type Configfile struct {
+	Concurrency   []int   `json:"concurrency"`
+	Repetitions   int     `json:"repetitions"`
+	CreatePrimary bool    `json:"createPrimary"`
+	Bucket        string  `json:"bucket"`
+	Cbhost        string  `json:"cbhost"`
+	Password      string  `json:"password"`
+	User          string  `json:"user"`
+	Indexes       []Index `json:"indexes"`
+	Queries       []Query `json:"queries"`
+}
+
+func parseConfig() {
+	data, err := ioutil.ReadFile(*configuration)
+	if err != nil {
+		log.Print(err)
+		log.Panicf("Cannot open the configuration file %s", *configuration)
+	}
+	err = json.Unmarshal(data, &executionConfig)
+	panicIt(err, "Invalid configuration file or format")
+	repetitions = executionConfig.Repetitions
+}
 
 func genericEHandler(err error) {
 	if err != nil {
