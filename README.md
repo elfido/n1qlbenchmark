@@ -19,7 +19,7 @@ All flags and options are available with the following command:
 * -c Number of logical CPUs used for the test, default 2
 * -i Configuration input file, default ```config.json```
 * -o Output csv file, default ```report-execution.csv```
-* -p Output txt file with the explain of the queries, default ```explain.json```
+* -p Output json file with the explain of the queries, default ```explain.json```
 * -t Query timeout, default 30s (30 seconds)
 * -pause Pause between tests, usefult to allow Couchbase to recover and have a clear separation between different queries. Default 2s (2 seconds)
 
