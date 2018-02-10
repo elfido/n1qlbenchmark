@@ -288,6 +288,7 @@ func main() {
 		if *maxProcs > runtime.NumCPU() {
 			*maxProcs = runtime.NumCPU()
 		}
+		log.Printf("N1QL benchmark %s", VERSION)
 		log.Printf("Concurrency %d out of %d CPUs will be used", *maxProcs, runtime.NumCPU())
 		runtime.GOMAXPROCS(*maxProcs)
 		parseConfig()
